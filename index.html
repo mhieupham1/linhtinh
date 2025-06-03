@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Photoshop-like Bevel & Emboss (Canvas Demo)</title>
+    <style>
+        body {
+            background: #181818;
+            color: #fff;
+            font-family: sans-serif;
+        }
+
+        .ctrl {
+            margin: 8px 0;
+        }
+
+        label {
+            margin-right: 12px;
+        }
+
+        canvas {
+            background: #242424;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+
+<body>
+    <h3>Bevel & Emboss Canvas Demo (Near-Photoshop Style)</h3>
+    <canvas id="src" width="320" height="300"></canvas>
+    <canvas id="bevel" width="320" height="300"></canvas>
+    <div class="ctrl">
+        <label>Style:
+            <select id="style">
+                <option value="inner">Inner Bevel</option>
+                <option value="outer">Outer Bevel</option>
+                <!-- <option value="emboss">Emboss</option> -->
+                <option value="pillow">Pillow Emboss</option>
+            </select>
+        </label>
+        <label>Technique:
+            <select id="tech">
+                <option value="smooth">Smooth</option>
+                <option value="hard">Chisel Hard</option>
+                <option value="soft">Chisel Soft</option>
+            </select>
+        </label>
+        <label>Direction:
+            <select id="dir">
+                <option value="up">Up</option>
+                <option value="down">Down</option>
+            </select>
+        </label>
+        <label>Depth: <input type="range" id="depth" min="1" max="300" value="150"></label>
+        <label>Size: <input type="range" id="size" min="1" max="500" value="15"></label>
+        <label>Soften: <input type="range" id="soften" min="0" max="10" value="0"></label>
+        <br>
+        <label>Angle: <input type="range" id="angle" min="0" max="360" value="74"></label>
+        <label>Elevation: <input type="range" id="elev" min="0" max="90" value="11"></label>
+        <label>Highlight: <input type="color" id="hiColor" value="#ffffff"></label>
+        <label>Opacity: <input type="range" id="hiOp" min="0" max="100" value="50"></label>
+        <label>Shadow: <input type="color" id="shColor" value="#ff0000"></label>
+        <label>Opacity: <input type="range" id="shOp" min="0" max="100" value="50"></label>
+
+    </div>
+    <button id="drawText">Draw Text</button>
+    <button id="drawImg">Draw Image</button>
+
+    <script>
+        // Vẽ text mẫu ban đầu
+        const src = document.getElementById('src');
+        const ctx = src.getContext('2d');
+        function drawText() {
+            ctx.clearRect(0, 0, src.width, src.height);
+            ctx.save();
+            ctx.font = "bold 64px Arial Black, Arial, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillStyle = "#fff";
+            ctx.shadowColor = "#222"; ctx.shadowBlur = 4;
+            ctx.fillText("EMBOSS", src.width / 2, src.height / 2);
+            ctx.restore();
+        }
+        drawText();
+
+        let img = new Image();
+        img.src = '';
+
+        // ---- Bevel & Emboss core ----
+        function rgb2arr(rgb) {
+            if (rgb.startsWith("#")) {
+                let v = parseInt(rgb.substr(1), 16);
+                if (rgb.length == 7) return [v >> 16 & 255, v >> 8 & 255, v & 255];
+                if (rgb.length == 4) return [
+                    ((v >> 8) & 15) * 17,
+                    ((v >> 4) & 15) * 17,
+                    (v & 15) * 17
+                ];
+            }
+            return [255, 255, 255];
+        }
+
+        function blendNormal(src, top, alpha) {
+            return src * (1 - alpha) + top * alpha;
+        }
+
+        // Convolution kernel (Sobel, Laplace...) cho kỹ thuật Chisel
+        function convolveAlpha(img, w, h, kernel) {
+            let out = new Float32Array(w * h);
+            for (let y = 1; y < h - 1; ++y) for (let x = 1; x < w - 1; ++x) {
+                let s = 0;
+                for (let dy = -1; dy <= 1; ++dy) for (let dx = -1; dx <= 1; ++dx)
+                    s += img[(y + dy) * w + (x + dx)] * kernel[(dy + 1) * 3 + (dx + 1)];
+                out[y * w + x] = s;
+            }
+            return out;
+        }
+
+        // Tạo height map từ alpha mask
+        function getHeightMap(imd, w, h, style, size, soften) {
+            let mask = new Float32Array(w * h);
+            for (let i = 0; i < w * h; ++i) mask[i] = imd.data[i * 4 + 3] / 255;
+            // console.log('before mask', mask);
+
+            // Soften mép (blur mask)
+            if (soften > 0) {
+                let tmp = new Float32Array(mask);
+                for (let k = 0; k < soften; ++k) {
+                    for (let y = 1; y < h - 1; ++y)
+                        for (let x = 1; x < w - 1; ++x) {
+                            let s = 0, c = 0;
+                            for (let dy = -2; dy <= 2; ++dy)
+                                for (let dx = -2; dx <= 2; ++dx) {
+                                    s += tmp[(y + dy) * w + (x + dx)];
+                                    c++;
+                                }                                
+                            mask[y * w + x] = s / c;
+                        }
+                    tmp.set(mask);
+                }
+            }
+            // console.log('after mask', mask);
+            // Tùy style: Emboss (inner/outer/pillow)
+            let out = new Float32Array(w * h);
+            if (style == "inner" || style == "emboss" || style == "pillow") {
+                for (let y = 0; y < h; ++y)for (let x = 0; x < w; ++x) {
+                    let i = y * w + x;
+                    if (mask[i] > 0.05) out[i] = mask[i];
+                }
+            }
+            if (style == "outer") {
+                for (let y = 0; y < h; ++y)for (let x = 0; x < w; ++x) {
+                    let i = y * w + x;
+                    if (mask[i] <= 0.05) {
+                        let n = 0;
+                        for (let dy = -size; dy <= size; ++dy)
+                            for (let dx = -size; dx <= size; ++dx) {
+                                let xx = Math.min(w - 1, Math.max(0, x + dx)), yy = Math.min(h - 1, Math.max(0, y + dy));
+                                if (mask[yy * w + xx] > 0.05) n = 1;
+                            }
+                        out[i] = n;
+                    }
+                }
+            }
+            if (style == "pillow") {
+                // Đảo chiều mask, để lõm
+                for (let i = 0; i < w * h; ++i) out[i] = 1 - mask[i];
+            }
+            return out;
+        }
+
+        function bevelEmboss(canvas, opt) {
+            let { style, tech, direction, depth, size, soften, angle, elev, hiColor, hiOp, shColor, shOp } = opt;
+            // console.log('angle', angle, depth);
+
+            let w = canvas.width, h = canvas.height;
+            let ctx = canvas.getContext('2d');
+            let imd = ctx.getImageData(0, 0, w, h);
+            let mask = getHeightMap(imd, w, h, style, size, soften);
+            // Tính gradXY (slope map)
+            let gradX = new Float32Array(w * h), gradY = new Float32Array(w * h);
+            for (let y = 1; y < h - 1; ++y) for (let x = 1; x < w - 1; ++x) {
+                let i = y * w + x;
+                gradX[i] = (mask[i + 1] - mask[i - 1]) * depth / 255 * size;
+                gradY[i] = (mask[i + w] - mask[i - w]) * depth / 255 * size;
+            }
+            // Chisel: dùng Sobel/laplace cho edge sharp
+            if (tech == "hard" || tech == "soft") {
+                let sobel = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+                gradX = convolveAlpha(mask, w, h, sobel);
+                gradY = convolveAlpha(mask, w, h, [-1, -2, -1, 0, 0, 0, 1, 2, 1]);
+                if (tech == "soft") {
+                    for (let i = 0; i < w * h; ++i) { gradX[i] *= 0.6; gradY[i] *= 0.6; }
+                }
+            }
+            // Ánh sáng
+            let radA = angle / 180 * Math.PI, radE = elev / 180 * Math.PI;
+            let lx = Math.cos(radE) * Math.cos(radA), ly = Math.cos(radE) * Math.sin(radA), lz = Math.sin(radE);
+            let hi = rgb2arr(hiColor), sh = rgb2arr(shColor);
+            // Nổi lên/hõm xuống
+            let dir = (direction == "down") ? -1 : 1;
+            let out = new Uint8ClampedArray(w * h * 4);
+            for (let y = 1; y < h - 1; ++y) for (let x = 1; x < w - 1; ++x) {
+                let i = y * w + x;
+                let nx = -gradX[i] * dir, ny = -gradY[i] * dir, nz = 1.0;
+                let len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+                nx /= len; ny /= len; nz /= len;
+                let d = nx * lx + ny * ly + nz * lz;
+                let srcR = imd.data[i * 4], srcG = imd.data[i * 4 + 1], srcB = imd.data[i * 4 + 2], srcA = imd.data[i * 4 + 3];
+                if (d > 0) { // Highlight
+                    out[i * 4] = blendNormal(srcR, hi[0], hiOp / 100 * d);
+                    out[i * 4 + 1] = blendNormal(srcG, hi[1], hiOp / 100 * d);
+                    out[i * 4 + 2] = blendNormal(srcB, hi[2], hiOp / 100 * d);
+                } else { // Shadow
+                    out[i * 4] = blendNormal(srcR, sh[0], shOp / 100 * (-d));
+                    out[i * 4 + 1] = blendNormal(srcG, sh[1], shOp / 100 * (-d));
+                    out[i * 4 + 2] = blendNormal(srcB, sh[2], shOp / 100 * (-d));
+                }
+                out[i * 4 + 3] = srcA;
+            }
+            let outImd = new ImageData(out, w, h);
+            document.getElementById('bevel').getContext('2d').putImageData(outImd, 0, 0);
+        }
+
+        // --- Control ---
+        function update() {
+            let style = document.getElementById('style').value;
+            let tech = document.getElementById('tech').value;
+            let direction = document.getElementById('dir').value;
+            let depth = +document.getElementById('depth').value;
+            let size = +document.getElementById('size').value;
+            let soften = +document.getElementById('soften').value;
+            let angle = +document.getElementById('angle').value;
+            let elev = +document.getElementById('elev').value;
+            let hiColor = document.getElementById('hiColor').value;
+            let hiOp = +document.getElementById('hiOp').value;
+            let shColor = document.getElementById('shColor').value;
+            let shOp = +document.getElementById('shOp').value;
+            bevelEmboss(src, {
+                style, tech, direction, depth, size, soften, angle, elev, hiColor, hiOp, shColor, shOp
+            });
+        }
+        document.querySelectorAll('input,select').forEach(e => e.oninput = update);
+
+        document.getElementById('drawText').onclick = () => {
+            drawText();
+            update();
+        };
+        document.getElementById('drawImg').onclick = () => {
+            ctx.clearRect(0, 0, src.width, src.height);
+            ctx.drawImage(img, 0, 0, src.width, src.height);
+            update();
+        };
+
+        drawText();
+        update();
+    </script>
+</body>
+
+</html>
